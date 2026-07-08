@@ -1,0 +1,177 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import convolve2d
+from skimage import data
+from skimage.util import random_noise
+import zipfile
+import os
+
+# Import Colab file download utility
+try:
+    from google.colab import files
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+    print("Not running in Google Colab. The zip file will be saved locally.")
+
+# ==========================================
+# CORE ALGORITHMS: Polynomial Stencil Generation
+# ==========================================
+
+def generate_stencil(N_coords, weights):
+    """Maps a list of spatial offsets (x,y) and weights to a dense numpy array."""
+    if not N_coords:
+        return np.zeros((1, 1))
+    
+    min_x = min(k[0] for k in N_coords)
+    max_x = max(k[0] for k in N_coords)
+    min_y = min(k[1] for k in N_coords)
+    max_y = max(k[1] for k in N_coords)
+    
+    H = np.zeros((max_y - min_y + 1, max_x - min_x + 1))
+    for (x, y), w in zip(N_coords, weights):
+        H[y - min_y, x - min_x] = w
+        
+    return H
+
+def generate_laplacian(N_coords, weights):
+    """Generates a zero-sum Laplacian stencil from positive half-space coordinates."""
+    N_lap, W_lap, C = [], [], 0
+    for (x, y), w in zip(N_coords, weights):
+        N_lap.extend([(x, y), (-x, -y)])
+        W_lap.extend([w, w])
+        C -= 2 * w
+    N_lap.append((0, 0)) # Center pixel
+    W_lap.append(C)
+    return generate_stencil(N_lap, W_lap)
+
+# ==========================================
+# FIGURE: Nonlinear PDE Diffusion
+# ==========================================
+def run_pde_experiment():
+    print("Generating PDE Diffusion...")
+    # FIX: Properly normalize the image to the [0.0, 1.0] range
+    img = data.camera() / 255.0
+    noisy_img = random_noise(img, mode='gaussian', var=0.01)
+    
+    # Standard 3x3 Laplacian vs Algebraic 5x5 Laplacian
+    lap_3x3 = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]])
+    N_coords_5x5 = [(1,0), (2,0), (0,1), (1,1), (2,1), (-1,1), (-2,1), (0,2)]
+    alg_laplacian = generate_laplacian(N_coords_5x5, [1]*len(N_coords_5x5))
+    
+    grad_x, grad_y = np.array([[-1, 0, 1]]), np.array([[-1], [0], [1]])
+    tau, kappa, iters = 0.05, 0.1, 20
+    
+    iso_u = np.copy(noisy_img)
+    aniso_u = np.copy(noisy_img)
+    
+    for _ in range(iters):
+        iso_u += tau * convolve2d(iso_u, lap_3x3, mode='same', boundary='symm')
+        
+        dx = convolve2d(aniso_u, grad_x, mode='same', boundary='symm')
+        dy = convolve2d(aniso_u, grad_y, mode='same', boundary='symm')
+        c = np.exp(-((dx**2 + dy**2) / kappa**2))
+        aniso_u += tau * convolve2d(aniso_u * c, alg_laplacian, mode='same', boundary='symm')
+        
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    ax[0].imshow(noisy_img, cmap='gray'); ax[0].set_title('Noisy Input'); ax[0].axis('off')
+    ax[1].imshow(iso_u, cmap='gray'); ax[1].set_title('Linear Isotropic Smoothing'); ax[1].axis('off')
+    ax[2].imshow(aniso_u, cmap='gray'); ax[2].set_title('Algebraic Nonlinear PDE'); ax[2].axis('off')
+    
+    plt.tight_layout()
+    filename = 'pde_diffusion.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    return filename
+
+# ==========================================
+# FIGURE: SDE Dynamics
+# ==========================================
+def run_sde_experiment():
+    print("Generating SDE Dynamics...")
+    # FIX: Properly normalize the image to the [0.0, 1.0] range
+    img = data.camera() / 255.0
+    
+    # Algebraic 5x5 Laplacian for spatial drift
+    N_coords = [(1,0), (2,0), (0,1), (1,1), (2,1), (-1,1), (-2,1), (0,2)]
+    alg_laplacian = generate_laplacian(N_coords, [1]*len(N_coords))
+    
+    dt, sigma, theta, iters = 0.05, 0.02, 0.5, 15
+    
+    bm_u = np.copy(img)
+    ou_u = np.copy(img)
+    
+    for _ in range(iters):
+        # Brownian Motion
+        bm_u += sigma * np.sqrt(dt) * np.random.normal(0, 1, img.shape)
+        
+        # OU Process
+        drift = convolve2d(ou_u, alg_laplacian, mode='same', boundary='symm')
+        ou_u += theta * drift * dt + sigma * np.sqrt(dt) * np.random.normal(0, 1, img.shape)
+        
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    ax[0].imshow(img, cmap='gray'); ax[0].set_title('Initial State $X_0$'); ax[0].axis('off')
+    ax[1].imshow(bm_u, cmap='gray'); ax[1].set_title('Pure Brownian Motion SDE'); ax[1].axis('off')
+    ax[2].imshow(ou_u, cmap='gray'); ax[2].set_title('SDE with Algebraic Spatial Drift'); ax[2].axis('off')
+    
+    plt.tight_layout()
+    filename = 'sde_dynamics.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    return filename
+
+# ==========================================
+# FIGURE: PDE Classification
+# ==========================================
+def run_classification_experiment():
+    print("Generating PDE Classification...")
+    size, center = 51, 25
+    impulse = np.zeros((size, size))
+    impulse[center, center] = 1.0
+
+    # Stencils for Elliptic (>0), Parabolic (=0), Hyperbolic (<0)
+    stencil_elliptic = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]])
+    stencil_parabolic = np.array([[0, 0, 0], [1, -2, 1], [0, 0, 0]])
+    stencil_hyperbolic = np.array([[0, -1, 0], [1, 0, 1], [0, -1, 0]])
+
+    tau, iters = 0.1, 60
+    u_ell, u_par, u_hyp = np.copy(impulse), np.copy(impulse), np.copy(impulse)
+    
+    for _ in range(iters):
+        u_ell += tau * convolve2d(u_ell, stencil_elliptic, mode='same', boundary='fill')
+        u_par += tau * convolve2d(u_par, stencil_parabolic, mode='same', boundary='fill')
+        u_hyp += (tau * 0.5) * convolve2d(u_hyp, stencil_hyperbolic, mode='same', boundary='fill')
+
+    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+    
+    ax[0].imshow(u_ell, cmap='magma'); ax[0].set_title(r'Elliptic ($\chi > 0$)'); ax[0].axis('off')
+    ax[1].imshow(u_par, cmap='magma'); ax[1].set_title(r'Parabolic ($\chi = 0$)'); ax[1].axis('off')
+    ax[2].imshow(np.abs(u_hyp), cmap='magma'); ax[2].set_title(r'Hyperbolic ($\chi < 0$)'); ax[2].axis('off')
+    
+    plt.tight_layout()
+    filename = 'pde_classification.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    return filename
+
+# ==========================================
+# MAIN EXECUTION & ZIP ARCHIVE CREATION
+# ==========================================
+
+f1 = run_pde_experiment()
+f2 = run_sde_experiment()
+f3 = run_classification_experiment()
+
+zip_filename = 'jmiv_algebraic_figures.zip'
+print(f"\nPackaging figures into {zip_filename}...")
+
+with zipfile.ZipFile(zip_filename, 'w') as zipf:
+    zipf.write(f1)
+    zipf.write(f2)
+    zipf.write(f3)
+
+print("Zipping complete.")
+
+if IN_COLAB:
+    print("Initiating download...")
+    files.download(zip_filename)
