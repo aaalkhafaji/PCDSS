@@ -1,0 +1,125 @@
+import numpy as np
+import cv2
+from scipy.signal import convolve2d
+import zipfile
+import os
+
+try:
+    from google.colab import files
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+print("Initializing Algebraic PDE Video Generation...")
+
+# ==========================================
+# 1. SETUP VIDEO PARAMETERS & STENCILS
+# ==========================================
+width, height = 256, 256
+frames = 60
+fps = 15
+
+# Algebraic Stencils from the Paper's Classification
+# 1. Elliptic (Stable Isotropic Diffusion)
+stencil_elliptic = np.array([
+    [1, 2, 1],
+    [2, 4, 2],
+    [1, 2, 1]
+]) / 16.0  # Normalized to prevent blowing up the signal
+
+# 2. Parabolic (Singular Horizontal Flow)
+stencil_parabolic = np.array([
+    [0, 0, 0],
+    [1, 2, 1],
+    [0, 0, 0]
+]) / 4.0
+
+# 3. Hyperbolic (Unstable Saddle / Shear)
+# Designed to amplify diagonals and suppress orthogonal axes
+stencil_hyperbolic = np.array([
+    [-1,  0,  1],
+    [ 0,  1,  0],
+    [ 1,  0, -1]
+])
+
+# ==========================================
+# 2. GENERATE ORIGINAL SYNTHETIC VIDEO
+# ==========================================
+def generate_original_frames():
+    """Generates a moving noisy shape to serve as the input signal."""
+    raw_frames = []
+    for t in range(frames):
+        img = np.zeros((height, width), dtype=float)
+        
+        # Moving geometric shape (trajectory)
+        cx = int(width * 0.2 + (width * 0.6) * (t / frames))
+        cy = int(height * 0.5 + 40 * np.sin(2 * np.pi * t / 30))
+        cv2.circle(img, (cx, cy), 25, 1.0, -1)
+        
+        # Add stochastic noise
+        noise = np.random.normal(0, 0.2, (height, width))
+        img = np.clip(img + noise, 0, 1)
+        raw_frames.append(img)
+    return raw_frames
+
+print("Generating original noisy signal video...")
+input_frames = generate_original_frames()
+
+# ==========================================
+# 3. VIDEO WRITING UTILITY
+# ==========================================
+def write_video(filename, frame_list, apply_stencil=None):
+    """Processes frames and writes them to an MP4 video file."""
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(filename, fourcc, fps, (width, height), isColor=False)
+    
+    current_state = np.copy(frame_list[0])
+    
+    for i in range(frames):
+        if apply_stencil is None:
+            # Original Video
+            processed_frame = frame_list[i]
+        else:
+            # Apply Algebraic PDE evolution (Effect)
+            # We blend the temporal movement with the spatial diffusion
+            current_state = 0.5 * current_state + 0.5 * frame_list[i]
+            current_state = convolve2d(current_state, apply_stencil, mode='same', boundary='symm')
+            processed_frame = current_state
+            
+        # Normalize to 0-255 for video encoding
+        processed_frame = np.clip(processed_frame, 0, 1)
+        frame_8bit = (processed_frame * 255).astype(np.uint8)
+        
+        out.write(frame_8bit)
+        
+    out.release()
+    print(f"Saved: {filename}")
+
+# ==========================================
+# 4. PROCESS & EXPORT ALL VIDEOS
+# ==========================================
+print("Applying Algebraic Stencils and rendering videos...")
+
+write_video('01_original_noisy_signal.mp4', input_frames, apply_stencil=None)
+write_video('02_elliptic_smoothing.mp4', input_frames, apply_stencil=stencil_elliptic)
+write_video('03_parabolic_directional_flow.mp4', input_frames, apply_stencil=stencil_parabolic)
+write_video('04_hyperbolic_shock_shear.mp4', input_frames, apply_stencil=stencil_hyperbolic)
+
+# ==========================================
+# 5. PACKAGE INTO ZIP & DOWNLOAD
+# ==========================================
+zip_filename = 'Algebraic_PDE_Video_Demos.zip'
+print(f"\nPackaging videos into {zip_filename}...")
+
+with zipfile.ZipFile(zip_filename, 'w') as zipf:
+    zipf.write('01_original_noisy_signal.mp4')
+    zipf.write('02_elliptic_smoothing.mp4')
+    zipf.write('03_parabolic_directional_flow.mp4')
+    zipf.write('04_hyperbolic_shock_shear.mp4')
+
+print("Zipping complete.")
+
+if IN_COLAB:
+    print("Initiating download...")
+    files.download(zip_filename)
